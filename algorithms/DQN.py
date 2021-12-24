@@ -10,14 +10,18 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import random
-from assets.memorybuffer import MemoryBuffer
 import numpy as np
-import random
 from collections import deque
-import numpy as np
 import wandb
 
-wandb.init(project="DQN", entity="ansonwhho")
+from assets.memorybuffer import MemoryBuffer
+
+
+WANDB = 0
+
+if WANDB:
+    wandb.init(project="DQN", entity="ansonwhho")
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def make_environment(game, num_frame_stack):
@@ -91,10 +95,12 @@ def train_model(minibatch, discount):
     reward_minibatch = [transition[2] for transition in minibatch]
     reward_minibatch = torch.tensor(reward_minibatch)
     next_state_minibatch = [transition[3] for transition in minibatch]
+    done_minibatch= [transition[4] for transition in minibatch]
+    done_minibatch = torch.Tensor(done_minibatch)
 
     target_q_values = [target_net.forward_pass(state) for state in next_state_minibatch]
     target_q_values = torch.stack(target_q_values, dim=0)
-    targets = torch.add(reward_minibatch, discount * torch.max(target_q_values, dim=1)[0])
+    targets = torch.add(reward_minibatch,  (1 - done_minibatch) * discount * torch.max(target_q_values, dim=1)[0])
 
     policy_values = [policy_net.forward_pass(state) for state in state_minibatch]
     policy_values = torch.stack(policy_values, dim=0)
@@ -106,6 +112,7 @@ def train_model(minibatch, discount):
 
     loss = policy_net.loss_function(predictions, targets)
     # loss = policy_net.loss_function(prediction, target)
+    optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
@@ -148,7 +155,8 @@ if __name__=="__main__":
 
     }
 
-    wandb.config = config
+    if WANDB:
+        wandb.config = config
 
     episode_durations = []
 
@@ -158,7 +166,7 @@ if __name__=="__main__":
 
     # inputs for taking actions
     memory = MemoryBuffer(1_000_000)
-    num_episodes = 1_000
+    num_episodes = 100
     max_time = 10_000
     discount = 0.99
 
@@ -183,7 +191,9 @@ if __name__=="__main__":
         observation = env.reset()
         state = torch.from_numpy(observation.__array__()) / 255
         state = state.permute((3,0,1,2)).unsqueeze(0)
-        wandb.log({"loss": loss})
+
+        if WANDB:
+            wandb.log({"loss": loss})
 
         for t in range(max_time):
 
@@ -195,7 +205,7 @@ if __name__=="__main__":
             # store transition minibatch
             next_state = torch.from_numpy(observation.__array__()) / 255
             next_state = next_state.permute((3,0,1,2)).unsqueeze(0)
-            transition.extend([action, reward, next_state])
+            transition.extend([action, reward, next_state, done])
             memory.store_transition(transition)
 
             if len(memory) >= 10 * minibatch_size:
