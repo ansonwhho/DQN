@@ -15,8 +15,15 @@ class MemoryBuffer:
         super().__init__()
         self.memory = deque(maxlen=N)
     
-    def store_transition(self, transition: list):
+    def store_transition(self, state, action, reward, next_state, done):
+        # differs from the original paper due to the inclusion of "done"
+        transition = [state, action, reward, next_state, done]
         self.memory.append(transition)
+
+    # def store_transition(self, transition):
+    #     # differs from the original paper due to the inclusion of "done"
+    #     # transition = [state, action, reward, next_state, done]
+    #     self.memory.append(transition)
 
     def random_sample(self, minibatch_size):
         minibatch = random.sample(self.memory, minibatch_size)
