@@ -4,13 +4,11 @@ __pycache__/
 *$py.class
 
 # Other files
-test_image.png
-test.py
-test1.py
-test2.py
-DQN-copy.py
+tests
+archive
 data
 wandb
+.DS_Store
 
 # C extensions
 *.so

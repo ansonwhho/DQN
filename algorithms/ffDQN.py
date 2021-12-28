@@ -28,13 +28,20 @@ class ffDQN(nn.Module):
         super(ffDQN, self).__init__()
         self.fc1 = nn.Linear(num_inputs, config["l1_neurons"])
         self.fc2 = nn.Linear(config["l1_neurons"], config["l2_neurons"])
-        self.fc3 = nn.Linear(config["l2_neurons"], num_outputs)
-        self.loss_function = nn.MSELoss()
+        self.fc3 = nn.Linear(config["l2_neurons"], config["l3_neurons"])
+        self.fc4 = nn.Linear(config["l3_neurons"], num_outputs)
+        self.loss_function = nn.SmoothL1Loss()
+
+        torch.nn.init.normal_(self.fc1.weight, mean=0.0, std=0.1)
+        torch.nn.init.normal_(self.fc2.weight, mean=0.0, std=0.1)
+        torch.nn.init.normal_(self.fc3.weight, mean=0.0, std=0.1)
+        torch.nn.init.normal_(self.fc4.weight, mean=0.0, std=0.1)
     
-    def forward_pass(self, state):
+    def forward(self, state):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)
         return x
 
 def epsilon_greedy(epsilon, state):
@@ -43,7 +50,7 @@ def epsilon_greedy(epsilon, state):
     epsilon-greedy policy
     """
 
-    q_values = policy_net.forward_pass(state)
+    q_values = net(state)
     max_q_value = torch.max(q_values).detach().numpy()
 
     # explore
@@ -61,7 +68,7 @@ def optimise():
     given a minibatch of transitions
     """
 
-    if len(memory) < 10 * config["minibatch_size"]:
+    if len(memory) < config["minibatch_size"]:
         return
 
     minibatch = memory.random_sample(config["minibatch_size"])
@@ -69,24 +76,22 @@ def optimise():
     state_minibatch, action_minibatch, reward_minibatch, next_state_minibatch, done_minibatch = torch.stack(state_minibatch), torch.tensor(action_minibatch), torch.tensor(reward_minibatch), torch.stack(next_state_minibatch), torch.tensor(done_minibatch)
 
     # create mask for non-terminal states
-    mask = done_minibatch
+    mask = ~done_minibatch
     non_terminal_next_states = next_state_minibatch[mask]
 
     # predictions and targets
     next_q_values = torch.zeros((config["minibatch_size"], config["action_space_size"]))
-    next_q_values[mask] = target_net.forward_pass(non_terminal_next_states)
-    # print(torch.max(next_q_values, dim=1))
-    # print(torch.max(next_q_values, dim=1)[0])
-    # print(config["discount"])
+    next_q_values[mask] = net(non_terminal_next_states)
     targets = torch.add(reward_minibatch, config["discount"] * torch.max(next_q_values, dim=1)[0])
-    # predictions = policy_net(state_minibatch).gather(1, action_minibatch).long().unsqueeze(1).squeeze(1)
-    pred_q_vals = policy_net.forward_pass(state_minibatch)
-    predictions = pred_q_vals.gather(1, action_minibatch.unsqueeze(0))[0]
+    pred_q_vals = net(state_minibatch)
+    predictions = pred_q_vals.gather(1, action_minibatch.unsqueeze(1)).squeeze(1)
     
     # optimise
-    loss = policy_net.loss_function(predictions, targets)
+    loss = net.loss_function(predictions, targets)
     optimiser.zero_grad()
     loss.backward()
+    for param in net.parameters():
+        param.grad.data.clamp_(-1, 1)
     optimiser.step()
 
     return loss
@@ -99,6 +104,7 @@ def train(render_screen=True):
     for episode in range(config["num_episodes"]):
         observation = env.reset()
         episode_q_values = []
+        episode_reward = 0
 
         for t in range(config["max_episode_time"]):
 
@@ -112,9 +118,11 @@ def train(render_screen=True):
 
             memory.store_transition(state, action, reward, next_state, done)
             episode_q_values.append(q_value)
+            episode_reward += reward
             loss = optimise()
             
-            epsilon -= (config["initial_epsilon"] - config["final_epsilon"]) / config["epsilon_anneal_frames"]
+            if epsilon >= config["final_epsilon"]:
+                epsilon -= (config["initial_epsilon"] - config["final_epsilon"]) / config["epsilon_anneal_frames"]
 
             if WANDB:
                 wandb.log({
@@ -130,28 +138,33 @@ def train(render_screen=True):
                 episode_time = t + 1
                 break
 
-        avg_reward = episode_time # for cartpole, not in general
         avg_q_value = np.mean(episode_q_values)
+        avg_reward = episode_reward
 
     env.close()
 
 if __name__ == "__main__":
 
+    # classic_control_environments = ["MountainCar-v0", "CartPole-v1", "Acrobot-v1"]
+
+    game = "Acrobot-v1"
+
     # make environment
-    env = gym.make("CartPole-v1")
+    env = gym.make(game)
 
     config = {
-        "learning_rate": 1e-5,
-        "minibatch_size": 16,
-        "memory_capacity": 10_000, 
-        "num_episodes": 5_000,
+        "learning_rate": 3e-4,
+        "minibatch_size": 64,
+        "memory_capacity": 5_000, 
+        "num_episodes": 10_000,
         "max_episode_time": 10_000,
-        "discount": 0.999,
+        "discount": 0.99,
         "initial_epsilon": 1,
         "final_epsilon": 0.1,
         "epsilon_anneal_frames": 100_000,
         "l1_neurons": 32, 
         "l2_neurons": 64,
+        "l3_neurons": 64,
         "observation_space_size": env.observation_space.shape[0],
         "action_space_size": env.action_space.n
     }
@@ -159,12 +172,12 @@ if __name__ == "__main__":
     # logging results
     WANDB = 1
     if WANDB:
-        wandb.init(project="DQN-1", entity="ansonwhho", reinit=True)
+        wandb.init(project=game)
         wandb.config = config
 
     memory = MemoryBuffer(config["memory_capacity"])
-    policy_net = ffDQN(config["observation_space_size"], config["action_space_size"])
-    target_net = ffDQN(config["observation_space_size"], config["action_space_size"])
-    optimiser = torch.optim.SGD(policy_net.parameters(), lr=config["learning_rate"])
+    net = ffDQN(config["observation_space_size"], config["action_space_size"])
+    optimiser = torch.optim.RAdam(net.parameters(), lr=config["learning_rate"])
+    
 
     train()
